@@ -1,8 +1,8 @@
 # ggxcc
-GGX cube map convolver for ioQuake3's OpenGL2 renderer
+GGX cube map convolver for ioquake3's OpenGL2 renderer
 
 # So what's this for?
-The OpenGL2 renderer in ioQuake3 uses cube maps for specular reflection, and its internal shaders assume that the mipmaps in each cube map correspond to a linear roughness scale.  However, the renderer uses a simple downsampling method for these mipmaps, causing reflections to look pixelated and too sharp.
+The OpenGL2 renderer in ioquake3 uses cube maps for specular reflection, and its internal shaders assume that the mipmaps in each cube map correspond to a linear roughness scale.  However, the renderer uses a simple downsampling method for these mipmaps, causing reflections to look pixelated and too sharp.
 
 This program does offline GGX convolution for a cubemap, which can then be reinserted into the renderer for proper reflections.
 
