@@ -375,7 +375,7 @@ int main(int argc, char *argv[])
 	int inWidth, inHeight, inNumMips;
 	int numThreads = SCHED_DEFAULT;
 
-	printf("\nGGXCC: GGX cube map convolver for ioQuake3's OpenGL2 renderer\n");
+	printf("\nGGXCC: GGX cube map convolver for ioquake3's OpenGL2 renderer\n");
 	
 	int arg;
 	for (arg = 1; arg < argc; arg++)
