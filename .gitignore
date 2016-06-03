@@ -1,0 +1,6 @@
+build
+*.sdf
+*.opensdf
+*.suo
+VS2013/Release
+VS2013/Debug
