@@ -175,7 +175,7 @@ float calcWarp(int res)
 		return 0.0f;
 }
 
-void genNorm(float *norm, int x, int y, int face, int res, float warp)
+void genNorm(float norm[4], int x, int y, int face, int res, float warp)
 {
 	float st[2];
 
@@ -281,7 +281,7 @@ void convolveCubemapToPixel(uint8_t *outData, int outRes, int outNumMips, int ou
 	int outMipRes;
 	uint8_t *outPixel = outData + outPixelCount * 4;
 	float color[3] = {0.0f, 0.0f, 0.0f};
-	vec3_t vN_vE;
+	float vN_vE[4];
 	
 	// determine outFace, outY, outX
 	outMipRes = outRes;
