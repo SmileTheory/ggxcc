@@ -7,7 +7,7 @@ OBJFILES = \
 	ggxcc.o
 
 ggxcc.exe: $(OBJFILES:%.o=$(BUILD)/%.o)
-	$(CC) -static-libgcc $(OBJFILES:%.o=$(BUILD)/%.o) $(LIBS) -o $@
+	$(CC) $(OBJFILES:%.o=$(BUILD)/%.o) $(LIBS) -o $@
 
 default: ggxcc.exe
 
