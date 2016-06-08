@@ -69,6 +69,8 @@ typedef float vec3_t[3];
 #define DotProduct(a, b) ((a)[0] * (b)[0] + (a)[1] * (b)[1] + (a)[2] * (b)[2])
 
 #define CLAMP(i, min, max) (((i) < (min)) ? (min) : ((i) > (max)) ? (max) : (i))
+#define MIN(a,b) ( ((a) < (b)) ? (a) : (b) )
+#define MAX(a,b) ( ((a) > (b)) ? (a) : (b) )
 
 void Vec3Normalize(vec3_t v)
 {
@@ -192,28 +194,26 @@ float *formatDataForConvolution(uint8_t *rgba8, int inRes)
 {
 	int face, y, x;
 	unsigned char *inPixel = rgba8;
-	float *outData = malloc(inRes * inRes * 6 * 7 * sizeof(*outData));
+	float *outData = malloc(inRes * inRes * 6 * 5 * sizeof(*outData));
 	float *outPixel = outData;
 
 	for (face = 0; face < 6; face++)
 	{
 		for (y = 0; y < inRes; y++)
 		{
-			vec2_t st;
-			st[1] = convertNativeCoordToTexCoord(y, inRes, 0.0f);
+			vec2_t v;
+			v[1] = -1.0f + 1.0f / inRes + 2.0f * y / inRes ;
 
 			for (x = 0; x < inRes; x++)
 			{
-				st[0] = convertNativeCoordToTexCoord(x, inRes, 0.0f);
+				v[0] = -1.0f + 1.0f / inRes + 2.0f * x / inRes ;
 
-				MapCubeToVec3(outPixel, st, face);
-				Vec3Normalize(outPixel);
-				outPixel[3] = solidAngleTerm(x, y, 1.0f / inRes);
-				outPixel[4] = ryg_srgb8_to_float(*inPixel++);
-				outPixel[5] = ryg_srgb8_to_float(*inPixel++);
-				outPixel[6] = ryg_srgb8_to_float(*inPixel++);
+				*outPixel++ = 1.0f / sqrt(v[0] * v[0] + v[1] * v[1] + 1.0f);
+				*outPixel++ = solidAngleTerm(x, y, 1.0f / inRes);
+				*outPixel++ = ryg_srgb8_to_float(*inPixel++);
+				*outPixel++ = ryg_srgb8_to_float(*inPixel++);
+				*outPixel++ = ryg_srgb8_to_float(*inPixel++);
 				inPixel++;
-				outPixel += 7;
 			}
 		}
 	}
@@ -221,7 +221,7 @@ float *formatDataForConvolution(uint8_t *rgba8, int inRes)
 	return outData;
 }
 
-void convolveFaceToVector(float outColor[3], float *outWeightAccum, float *vN_vE, float *inDataFP32, int face, int width, int height, float roughness)
+void convolveFaceToVector(float outColor[3], float *outWeightAccum, float *vN_vE_FaceSpace, float *inDataFP32, int face, int width, int height, float roughness)
 {
 	float color[3] = {0.0f, 0.0f, 0.0f}, weightAccum = 0.0f;
 	float alpha = roughness * roughness;
@@ -230,46 +230,101 @@ void convolveFaceToVector(float outColor[3], float *outWeightAccum, float *vN_vE
 	// constants to speed up ggx calculation in the main loop
 	float c1 = 0.5f * aa - 0.5f;
 	float c2 = c1 + 1.0f;
+	
+	// delta for NL per coordinate increment
+	float deltaNL_perX = vN_vE_FaceSpace[0] * 2.0f / width;
+	float deltaNL_perY = vN_vE_FaceSpace[1] * 2.0f / height;
+	
+	// value of NL at left side of texture, starts from top and incremented to bottom
+	float baseNL = vN_vE_FaceSpace[0] * (-1.0f + 1.0f / width) + vN_vE_FaceSpace[1] * (-1.0f + 1.0f / height) + vN_vE_FaceSpace[2];
 
-	int inY;
-	for (inY = 0; inY < height; inY++)
+	// determine valid Y range
+	// bail out if none
+	float NL = baseNL;
+	if (deltaNL_perX > 0.0f)
+		NL += deltaNL_perX * (width - 1);
+	
+	int startY = 0, endY = height;
+	if (deltaNL_perY == 0.0f)
 	{
-		int offset = (face * width * height) + (inY * width);
-		float *vL_inColor = inDataFP32 + offset * 7;
+		if (NL <= 0.0f)
+			goto ConvolveFinish;
+	}
+	else if (deltaNL_perY < 0.0f)
+	{
+		if (NL <= 0.0f)
+			goto ConvolveFinish;
+		endY = ceil(NL / -deltaNL_perY);
+		if (endY > height)
+			endY = height;
+	}
+	else if (NL <= 0.0f)
+	{
+		startY = ceil(-NL / deltaNL_perY);
+		if (startY > height)
+			goto ConvolveFinish;
+		baseNL += deltaNL_perY * startY;
+	}
+	
+	float *base_norm_angle_color = inDataFP32 + ((face * width * height) + (startY * width)) * 5;
+	
+	int leftY = endY - startY;
+	for (; leftY; leftY--, baseNL += deltaNL_perY, base_norm_angle_color += width * 5)
+	{
+		// determine valid X range
+		// skip line if none
+		NL = baseNL;
 		
-		int inX;
-		for (inX = 0; inX < width; inX++, vL_inColor += 7)
+		int startX = 0, endX = width;
+		if (deltaNL_perX == 0.0f)
 		{
-			float NL = DotProduct(vN_vE, vL_inColor);
-			if (NL > 0.0f)
-				break;
+			if (NL <= 0.0f)
+				continue;
 		}
-
-		for (; inX < width; inX++, vL_inColor += 7)
+		else if (deltaNL_perX < 0.0f)
 		{
-			float NL = DotProduct(vN_vE, vL_inColor);
-			if (NL < 0.0f)
-				break;
+			if (NL <= 0.0f)
+				continue;
+			endX = ceil(NL / -deltaNL_perX);
+			if (endX > width)
+				endX = width;
+		}
+		else if (NL <= 0.0f)
+		{
+			startX = ceil(-NL / deltaNL_perX);
+			if (startX > width)
+				continue;
+			NL += deltaNL_perX * startX;
+		}
+		
+		float *norm_angle_color = base_norm_angle_color + startX * 5;
+
+		int leftX = endX - startX;
+		for (; leftX; leftX--, NL += deltaNL_perX)
+		{
+			// normalize NL using stored inverse length of L
+			float nNL = NL * *norm_angle_color++;
 
 			// since vN == vE, acos(NH) = 0.5 * acos(NL)
 			// so calculate NH * NH from NL
 			// cos(t)^2 = cos(2t) * 0.5 + 0.5
 			
-			//float NHNH = NL * 0.5 + 0.5;
+			//float NHNH = nNL * 0.5 + 0.5;
 			//float d = NHNH * (aa - 1.0f) + 1.0f;
-			float d = NL * c1 + c2;
+			float d = nNL * c1 + c2;
 			float dSpecular = aa / (d * d);
 
-			float weight = vL_inColor[3] * dSpecular * NL;
+			float weight = *norm_angle_color++ * dSpecular * nNL;
 			
-			color[0] += vL_inColor[4] * weight;
-			color[1] += vL_inColor[5] * weight;
-			color[2] += vL_inColor[6] * weight;
+			color[0] += *norm_angle_color++ * weight;
+			color[1] += *norm_angle_color++ * weight;
+			color[2] += *norm_angle_color++ * weight;
 			
 			weightAccum += weight;
 		}
 	}
 	
+ConvolveFinish:	
 	outColor[0] = color[0];
 	outColor[1] = color[1];
 	outColor[2] = color[2];
@@ -323,10 +378,18 @@ void convolveCubemapToPixel(uint8_t *outData, int outRes, int outNumMips, int ou
 	int inFace;
 	for (inFace = 0; inFace < 6; inFace++)
 	{
+		int inAxis = inFace / 2;
+		int inAxisNeg = inFace & 1;
 		float faceColor[3];
 		float faceWeightAccum = 0.0f;
+		float vN_vE_FaceSpace[4];
 		
-		convolveFaceToVector(faceColor, &faceWeightAccum, vN_vE, inDataFP32, inFace, width, height, roughness);
+		// transform vN_vE to face space
+		vN_vE_FaceSpace[0] = (inAxis == 0) ? (inAxisNeg ? vN_vE[2] : -vN_vE[2]) : ((inFace == 5) ? -vN_vE[0] : vN_vE[0]);
+		vN_vE_FaceSpace[1] = (inAxis == 1) ? (inAxisNeg ? -vN_vE[2] : vN_vE[2]) : -vN_vE[1];
+		vN_vE_FaceSpace[2] = inAxisNeg ? -vN_vE[inAxis] : vN_vE[inAxis];
+		
+		convolveFaceToVector(faceColor, &faceWeightAccum, vN_vE_FaceSpace, inDataFP32, inFace, width, height, roughness);
 		Vec3Add(color, color, faceColor);
 		weightAccum += faceWeightAccum;
 	}
@@ -465,7 +528,7 @@ int main(int argc, char *argv[])
 	}
 	
 	printf("Reading %d pixels (%dx%dx6, 1 mip) from %s\n", inNumPixels, inWidth, inHeight, inFilename);
-	printf("Writing %d pixels(%dx%dx6, %d mips) to %s\n", outNumPixels, outRes, outRes, numMips, outFilename);
+	printf("Writing %d pixels (%dx%dx6, %d mips) to %s\n", outNumPixels, outRes, outRes, numMips, outFilename);
 	printf("Working...\n");
 	
 	int64_t startTime = jrcGetTime();
