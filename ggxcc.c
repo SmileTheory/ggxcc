@@ -319,17 +319,12 @@ void convolveCubemapToPixel(uint8_t *outData, int outRes, int outNumMips, int ou
 
 	genNorm(vN_vE, outX, outY, outFace, outMipRes, outWarp);
 
-	int outAxis = outFace / 2;
 	float weightAccum = 0.0f;
 	int inFace;
 	for (inFace = 0; inFace < 6; inFace++)
 	{
-		int inAxis = inFace / 2;
 		float faceColor[3];
 		float faceWeightAccum = 0.0f;
-		
-		if (outAxis == inAxis && outFace != inFace)
-			continue;
 		
 		convolveFaceToVector(faceColor, &faceWeightAccum, vN_vE, inDataFP32, inFace, width, height, roughness);
 		Vec3Add(color, color, faceColor);
