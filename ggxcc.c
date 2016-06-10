@@ -6,6 +6,9 @@
 #include "ryg_srgb_conv.h"
 
 #include <stdint.h>
+#if !defined(_MSC_VER)
+#include <cpuid.h>
+#endif
 
 // ***************************************************************************
 // jrc_time.h
@@ -221,7 +224,7 @@ float *formatDataForConvolution(uint8_t *rgba8, int inRes)
 	return outData;
 }
 
-void convolveFaceToVector(float outColor[3], float *outWeightAccum, float *vN_vE_FaceSpace, float *inDataFP32, int face, int width, int height, float roughness)
+void convolveFaceToVectorScalar(float outColor[3], float *outWeightAccum, float *vN_vE_FaceSpace, float *inDataFP32, int face, int width, int height, float roughness)
 {
 	float color[3] = {0.0f, 0.0f, 0.0f}, weightAccum = 0.0f;
 	float alpha = roughness * roughness;
@@ -331,6 +334,148 @@ ConvolveFinish:
 	*outWeightAccum = weightAccum;
 }
 
+
+SSE2FUNC void convolveFaceToVectorSSE(float outColor[3], float *outWeightAccum, float *vN_vE_FaceSpace, float *inDataFP32, int face, int width, int height, float roughness)
+{
+	__m128 results_4 = _mm_setzero_ps();
+	
+	// delta for NL per coordinate increment
+	float deltaNL_perX = vN_vE_FaceSpace[0] * 2.0f / width;
+	float deltaNL_perY = vN_vE_FaceSpace[1] * 2.0f / height;
+	
+	// value of NL at left side of texture, starts from top and incremented to bottom
+	float baseNL = vN_vE_FaceSpace[0] * (-1.0f + 1.0f / width) + vN_vE_FaceSpace[1] * (-1.0f + 1.0f / height) + vN_vE_FaceSpace[2];
+
+	// determine valid Y range
+	// bail out if none
+	float NL = baseNL;
+	if (deltaNL_perX > 0.0f)
+		NL += deltaNL_perX * (width - 1);
+	
+	int startY = 0, endY = height;
+	if (deltaNL_perY == 0.0f)
+	{
+		if (NL <= 0.0f)
+			goto ConvolveFinishSSE;
+	}
+	else if (deltaNL_perY < 0.0f)
+	{
+		if (NL <= 0.0f)
+			goto ConvolveFinishSSE;
+		endY = ceil(NL / -deltaNL_perY);
+		if (endY > height)
+			endY = height;
+	}
+	else if (NL <= 0.0f)
+	{
+		startY = ceil(-NL / deltaNL_perY);
+		if (startY > height)
+			goto ConvolveFinishSSE;
+		baseNL += deltaNL_perY * startY;
+	}
+	
+	float *base_norm_angle_color = inDataFP32 + ((face * width * height) + (startY * width)) * 5;
+
+	float alpha = roughness * roughness;
+	float aa = alpha * alpha;
+	
+	// constants to speed up ggx calculation in the main loop
+	float c1 = 0.5f * aa - 0.5f;
+	float c2 = c1 + 1.0f;
+
+	__m128 aa_4 = _mm_set1_ps(aa);
+	__m128 c1_4 = _mm_set1_ps(c1);
+	__m128 c2_4 = _mm_set1_ps(c2);
+	__m128 deltaNL_per4X_4 = _mm_set1_ps(deltaNL_perX * 4.0f);
+
+	int leftY = endY - startY;
+	for (; leftY; leftY--, baseNL += deltaNL_perY, base_norm_angle_color += width * 5)
+	{
+		// determine valid X range
+		// skip line if none
+		NL = baseNL;
+		
+		int startX = 0, endX = width;
+		if (deltaNL_perX == 0.0f)
+		{
+			if (NL <= 0.0f)
+				continue;
+		}
+		else if (deltaNL_perX < 0.0f)
+		{
+			if (NL <= 0.0f)
+				continue;
+			endX = ceil(NL / -deltaNL_perX);
+			if (endX > width)
+				endX = width;
+		}
+		else if (NL <= 0.0f)
+		{
+			startX = ceil(-NL / deltaNL_perX);
+			if (startX > width)
+				continue;
+		}
+		
+		startX = startX & ~0x03;
+		endX = (endX + 3) & ~0x03;
+
+		NL += deltaNL_perX * startX;
+		float *norm_angle_color = base_norm_angle_color + startX * 5;
+		
+		__m128 NL_4 = _mm_setr_ps(NL, NL + deltaNL_perX, NL + 2.0f * deltaNL_perX, NL + 3.0f * deltaNL_perX);
+
+		int leftX4 = (endX - startX) / 4;
+		for (; leftX4; leftX4--, norm_angle_color += 20)
+		{
+			__m128 norm_4   = _mm_setr_ps(norm_angle_color[0], norm_angle_color[5], norm_angle_color[10], norm_angle_color[15]);
+			__m128 angle_4  = _mm_setr_ps(norm_angle_color[1], norm_angle_color[6], norm_angle_color[11], norm_angle_color[16]);
+			__m128 color0_4 = _mm_setr_ps(norm_angle_color[2], norm_angle_color[7], norm_angle_color[12], norm_angle_color[17]);
+			__m128 color1_4 = _mm_setr_ps(norm_angle_color[3], norm_angle_color[8], norm_angle_color[13], norm_angle_color[18]);
+			__m128 color2_4 = _mm_setr_ps(norm_angle_color[4], norm_angle_color[9], norm_angle_color[14], norm_angle_color[19]);
+			
+			__m128 nNL_4 = _mm_mul_ps(NL_4, norm_4);
+			nNL_4 = _mm_max_ps(nNL_4, _mm_setzero_ps());
+		
+			__m128 ggx_4 = _mm_mul_ps(nNL_4, c1_4);
+			ggx_4 = _mm_add_ps(ggx_4, c2_4);
+			ggx_4 = _mm_mul_ps(ggx_4, ggx_4);
+			ggx_4 = _mm_div_ps(aa_4, ggx_4);
+			
+			__m128 weight_4 = _mm_mul_ps(angle_4, ggx_4);
+			weight_4 = _mm_mul_ps(weight_4, nNL_4);
+			
+			color0_4 = _mm_mul_ps(color0_4, weight_4);
+			color1_4 = _mm_mul_ps(color1_4, weight_4);
+			color2_4 = _mm_mul_ps(color2_4, weight_4);
+			
+			color0_4 = _mm_add_ps(color0_4, _mm_shuffle_ps(color0_4, color0_4, _MM_SHUFFLE(1, 0, 3, 2)));
+			color1_4 = _mm_add_ps(color1_4, _mm_shuffle_ps(color1_4, color1_4, _MM_SHUFFLE(1, 0, 3, 2)));
+			color2_4 = _mm_add_ps(color2_4, _mm_shuffle_ps(color2_4, color2_4, _MM_SHUFFLE(1, 0, 3, 2)));
+			weight_4 = _mm_add_ps(weight_4, _mm_shuffle_ps(weight_4, weight_4, _MM_SHUFFLE(1, 0, 3, 2)));
+			
+			color0_4 = _mm_add_ps(color0_4, _mm_shuffle_ps(color0_4, color0_4, _MM_SHUFFLE(0, 3, 2, 1)));
+			color1_4 = _mm_add_ps(color1_4, _mm_shuffle_ps(color1_4, color1_4, _MM_SHUFFLE(0, 3, 2, 1)));
+			color2_4 = _mm_add_ps(color2_4, _mm_shuffle_ps(color2_4, color2_4, _MM_SHUFFLE(0, 3, 2, 1)));
+			weight_4 = _mm_add_ps(weight_4, _mm_shuffle_ps(weight_4, weight_4, _MM_SHUFFLE(0, 3, 2, 1)));
+
+			NL_4 = _mm_add_ps(NL_4, deltaNL_per4X_4);
+			
+			__m128 shufl1_4 = _mm_shuffle_ps(color0_4, color1_4, _MM_SHUFFLE(0, 0, 0, 0));
+			__m128 shufl2_4 = _mm_shuffle_ps(color2_4, weight_4, _MM_SHUFFLE(0, 0, 0, 0));
+			__m128 shufl3_4 = _mm_shuffle_ps(shufl1_4, shufl2_4, _MM_SHUFFLE(2, 0, 2, 0));
+			results_4 = _mm_add_ps(results_4, shufl3_4);
+		}
+	}
+	
+ConvolveFinishSSE:	
+	outColor[0] = AS_FLOAT(GET_128(results_4).m128_u32[0]);
+	outColor[1] = AS_FLOAT(GET_128(results_4).m128_u32[1]);
+	outColor[2] = AS_FLOAT(GET_128(results_4).m128_u32[2]);
+	*outWeightAccum = AS_FLOAT(GET_128(results_4).m128_u32[3]);
+}
+
+void (*convolveFaceToVector)(float[3], float *, float *, float *, int, int, int, float) = convolveFaceToVectorScalar;
+
 void convolveCubemapToPixel(uint8_t *outData, int outRes, int outNumMips, int outPixelCount, float *inDataFP32, int width, int height)
 {
 	int outMipRes;
@@ -432,6 +577,7 @@ int main(int argc, char *argv[])
 	ddsFlags_t flags;
 	int inWidth, inHeight, inNumMips;
 	int numThreads = SCHED_DEFAULT;
+	int detect = 1;
 
 	printf("\nGGXCC: GGX cube map convolver for ioquake3's OpenGL2 renderer\n");
 	
@@ -456,21 +602,54 @@ int main(int argc, char *argv[])
 				printf("Using %d threads.\n", numThreads);
 				arg++;
 			}
+			else if (strcmp(argv[arg], "-s") == 0 && arg + 1 < argc)
+			{
+				if (strcmp(argv[arg+1], "on") == 0)
+				{
+					convolveFaceToVector = convolveFaceToVectorSSE;
+					printf("SSE2 enabled.\n");
+					detect = 0;
+				}
+				else if (strcmp(argv[arg+1], "off") == 0)
+				{
+					convolveFaceToVector = convolveFaceToVectorScalar;
+					printf("SSE2 disabled.\n");
+					detect = 0;
+				}
+				arg++;
+			}
 		}
 		else if (!inFilename)
 			inFilename = argv[arg];
 	}
 	
+	unsigned int cpuInfo[4];
+
+#if !defined(_MSC_VER)
+	__cpuid(1, cpuInfo[0], cpuInfo[1], cpuInfo[2], cpuInfo[3]);
+#else
+    __cpuid(cpuInfo, 1);
+#endif
+
+	unsigned int cpuInfo3 = cpuInfo[3];
+	
 	if (!inFilename)
 	{
 		printf("Usage: %s [options] <input.dds> -o <output.dds>\n", argv[0]);
 		printf("Available options:\n");
-		printf("  -o <output.dds> - Set output filename.  Default is output.dds.\n");
-		printf("  -t <threads>    - Set number of threads.  Default is all.\n");
+		printf("  -o <output.dds>  - Set output filename.  Default is output.dds.\n");
+		printf("  -t <threads>     - Set number of threads.  Default is all.\n");
+		printf("  -s <on|off|auto> - Enable SSE2 optimizations.  Default is autodetect.\n");
 		printf("\nOnly dds, 8-bit RGBA files are accepted as input.\n");
 		return 0;
 	}
 	
+	if (cpuInfo3 & (1 << 26) && detect)
+	{
+		printf("SSE2 autodetected.\n");
+		convolveFaceToVector = convolveFaceToVectorSSE;
+	}
+
 	if (!outFilename)
 		outFilename = "output.dds";
 	
