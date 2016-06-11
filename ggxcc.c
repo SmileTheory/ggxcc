@@ -193,7 +193,7 @@ void genNorm(float norm[4], int x, int y, int face, int res, float warp)
 	norm[3] = solidAngleTerm(x, y, 1.0f / res);
 }
 
-float *formatDataForConvolution(uint8_t *rgba8, int inRes)
+float *formatDataForConvolutionScalar(uint8_t *rgba8, int inRes)
 {
 	int face, y, x;
 	unsigned char *inPixel = rgba8;
@@ -223,6 +223,43 @@ float *formatDataForConvolution(uint8_t *rgba8, int inRes)
 	
 	return outData;
 }
+
+float *formatDataForConvolutionSSE2(uint8_t *rgba8, int inRes)
+{
+	int face, y, x;
+	unsigned char *inPixel = rgba8;
+	float *outData = _mm_malloc(inRes * inRes * 6 * 5 * sizeof(*outData), 16);
+	float *outPixel = outData;
+
+	for (face = 0; face < 6; face++)
+	{
+		for (y = 0; y < inRes; y++)
+		{
+			vec2_t v;
+			v[1] = -1.0f + 1.0f / inRes + 2.0f * y / inRes ;
+
+			for (x = 0; x < inRes; x += 4)
+			{
+				int sx;
+				for (sx = 0; sx < 4; sx++)
+				{
+					v[0] = -1.0f + 1.0f / inRes + 2.0f * (x + sx) / inRes ;
+					outPixel[ 0 + sx] = 1.0f / sqrt(v[0] * v[0] + v[1] * v[1] + 1.0f);
+					outPixel[ 4 + sx] = solidAngleTerm((x + sx), y, 1.0f / inRes);
+					outPixel[ 8 + sx] = ryg_srgb8_to_float(*inPixel++);
+					outPixel[12 + sx] = ryg_srgb8_to_float(*inPixel++);
+					outPixel[16 + sx] = ryg_srgb8_to_float(*inPixel++);
+					inPixel++;
+				}
+				outPixel += 20;
+			}
+		}
+	}
+	
+	return outData;
+}
+
+float *(*formatDataForConvolution)(uint8_t *, int) = formatDataForConvolutionScalar;
 
 void convolveFaceToVectorScalar(float outColor[3], float *outWeightAccum, float *vN_vE_FaceSpace, float *inDataFP32, int face, int width, int height, float roughness)
 {
@@ -335,7 +372,7 @@ ConvolveFinish:
 }
 
 
-SSE2FUNC void convolveFaceToVectorSSE(float outColor[3], float *outWeightAccum, float *vN_vE_FaceSpace, float *inDataFP32, int face, int width, int height, float roughness)
+SSE2FUNC void convolveFaceToVectorSSE2(float outColor[3], float *outWeightAccum, float *vN_vE_FaceSpace, float *inDataFP32, int face, int width, int height, float roughness)
 {
 	__m128 results_4 = _mm_setzero_ps();
 	
@@ -356,12 +393,12 @@ SSE2FUNC void convolveFaceToVectorSSE(float outColor[3], float *outWeightAccum, 
 	if (deltaNL_perY == 0.0f)
 	{
 		if (NL <= 0.0f)
-			goto ConvolveFinishSSE;
+			goto ConvolveFinishSSE2;
 	}
 	else if (deltaNL_perY < 0.0f)
 	{
 		if (NL <= 0.0f)
-			goto ConvolveFinishSSE;
+			goto ConvolveFinishSSE2;
 		endY = ceil(NL / -deltaNL_perY);
 		if (endY > height)
 			endY = height;
@@ -370,7 +407,7 @@ SSE2FUNC void convolveFaceToVectorSSE(float outColor[3], float *outWeightAccum, 
 	{
 		startY = ceil(-NL / deltaNL_perY);
 		if (startY > height)
-			goto ConvolveFinishSSE;
+			goto ConvolveFinishSSE2;
 		baseNL += deltaNL_perY * startY;
 	}
 	
@@ -427,11 +464,11 @@ SSE2FUNC void convolveFaceToVectorSSE(float outColor[3], float *outWeightAccum, 
 		int leftX4 = (endX - startX) / 4;
 		for (; leftX4; leftX4--, norm_angle_color += 20)
 		{
-			__m128 norm_4   = _mm_setr_ps(norm_angle_color[0], norm_angle_color[5], norm_angle_color[10], norm_angle_color[15]);
-			__m128 angle_4  = _mm_setr_ps(norm_angle_color[1], norm_angle_color[6], norm_angle_color[11], norm_angle_color[16]);
-			__m128 color0_4 = _mm_setr_ps(norm_angle_color[2], norm_angle_color[7], norm_angle_color[12], norm_angle_color[17]);
-			__m128 color1_4 = _mm_setr_ps(norm_angle_color[3], norm_angle_color[8], norm_angle_color[13], norm_angle_color[18]);
-			__m128 color2_4 = _mm_setr_ps(norm_angle_color[4], norm_angle_color[9], norm_angle_color[14], norm_angle_color[19]);
+			__m128 norm_4   = _mm_load_ps(norm_angle_color);
+			__m128 angle_4  = _mm_load_ps(norm_angle_color + 4);
+			__m128 color0_4 = _mm_load_ps(norm_angle_color + 8);
+			__m128 color1_4 = _mm_load_ps(norm_angle_color + 12);
+			__m128 color2_4 = _mm_load_ps(norm_angle_color + 16);
 			
 			__m128 nNL_4 = _mm_mul_ps(NL_4, norm_4);
 			nNL_4 = _mm_max_ps(nNL_4, _mm_setzero_ps());
@@ -441,33 +478,25 @@ SSE2FUNC void convolveFaceToVectorSSE(float outColor[3], float *outWeightAccum, 
 			ggx_4 = _mm_mul_ps(ggx_4, ggx_4);
 			ggx_4 = _mm_div_ps(aa_4, ggx_4);
 			
-			__m128 weight_4 = _mm_mul_ps(angle_4, ggx_4);
-			weight_4 = _mm_mul_ps(weight_4, nNL_4);
+			__m128 weight_4 = _mm_mul_ps(angle_4, nNL_4);
+			weight_4 = _mm_mul_ps(weight_4, ggx_4);
 			
 			color0_4 = _mm_mul_ps(color0_4, weight_4);
 			color1_4 = _mm_mul_ps(color1_4, weight_4);
 			color2_4 = _mm_mul_ps(color2_4, weight_4);
 			
-			color0_4 = _mm_add_ps(color0_4, _mm_shuffle_ps(color0_4, color0_4, _MM_SHUFFLE(1, 0, 3, 2)));
-			color1_4 = _mm_add_ps(color1_4, _mm_shuffle_ps(color1_4, color1_4, _MM_SHUFFLE(1, 0, 3, 2)));
-			color2_4 = _mm_add_ps(color2_4, _mm_shuffle_ps(color2_4, color2_4, _MM_SHUFFLE(1, 0, 3, 2)));
-			weight_4 = _mm_add_ps(weight_4, _mm_shuffle_ps(weight_4, weight_4, _MM_SHUFFLE(1, 0, 3, 2)));
-			
-			color0_4 = _mm_add_ps(color0_4, _mm_shuffle_ps(color0_4, color0_4, _MM_SHUFFLE(0, 3, 2, 1)));
-			color1_4 = _mm_add_ps(color1_4, _mm_shuffle_ps(color1_4, color1_4, _MM_SHUFFLE(0, 3, 2, 1)));
-			color2_4 = _mm_add_ps(color2_4, _mm_shuffle_ps(color2_4, color2_4, _MM_SHUFFLE(0, 3, 2, 1)));
-			weight_4 = _mm_add_ps(weight_4, _mm_shuffle_ps(weight_4, weight_4, _MM_SHUFFLE(0, 3, 2, 1)));
+			_MM_TRANSPOSE4_PS(color0_4, color1_4, color2_4, weight_4);
+
+			__m128 subtotal1_4 = _mm_add_ps(color0_4, color1_4);
+			__m128 subtotal2_4 = _mm_add_ps(color2_4, weight_4);
+			results_4 = _mm_add_ps(results_4, subtotal1_4);
+			results_4 = _mm_add_ps(results_4, subtotal2_4);
 
 			NL_4 = _mm_add_ps(NL_4, deltaNL_per4X_4);
-			
-			__m128 shufl1_4 = _mm_shuffle_ps(color0_4, color1_4, _MM_SHUFFLE(0, 0, 0, 0));
-			__m128 shufl2_4 = _mm_shuffle_ps(color2_4, weight_4, _MM_SHUFFLE(0, 0, 0, 0));
-			__m128 shufl3_4 = _mm_shuffle_ps(shufl1_4, shufl2_4, _MM_SHUFFLE(2, 0, 2, 0));
-			results_4 = _mm_add_ps(results_4, shufl3_4);
 		}
 	}
 	
-ConvolveFinishSSE:	
+ConvolveFinishSSE2:	
 	outColor[0] = AS_FLOAT(GET_128(results_4).m128_u32[0]);
 	outColor[1] = AS_FLOAT(GET_128(results_4).m128_u32[1]);
 	outColor[2] = AS_FLOAT(GET_128(results_4).m128_u32[2]);
@@ -606,13 +635,15 @@ int main(int argc, char *argv[])
 			{
 				if (strcmp(argv[arg+1], "on") == 0)
 				{
-					convolveFaceToVector = convolveFaceToVectorSSE;
+					convolveFaceToVector = convolveFaceToVectorSSE2;
+					formatDataForConvolution = formatDataForConvolutionSSE2;
 					printf("SSE2 enabled.\n");
 					detect = 0;
 				}
 				else if (strcmp(argv[arg+1], "off") == 0)
 				{
 					convolveFaceToVector = convolveFaceToVectorScalar;
+					formatDataForConvolution = formatDataForConvolutionScalar;
 					printf("SSE2 disabled.\n");
 					detect = 0;
 				}
@@ -647,7 +678,8 @@ int main(int argc, char *argv[])
 	if (cpuInfo3 & (1 << 26) && detect)
 	{
 		printf("SSE2 autodetected.\n");
-		convolveFaceToVector = convolveFaceToVectorSSE;
+		convolveFaceToVector = convolveFaceToVectorSSE2;
+		formatDataForConvolution = formatDataForConvolutionSSE2;
 	}
 
 	if (!outFilename)
