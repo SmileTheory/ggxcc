@@ -244,14 +244,17 @@ float *formatDataForConvolutionSSE2(uint8_t *rgba8, int inRes)
 				for (sx = 0; sx < 4; sx++)
 				{
 					v[0] = -1.0f + 1.0f / inRes + 2.0f * (x + sx) / inRes ;
-					outPixel[ 0 + sx] = 1.0f / sqrt(v[0] * v[0] + v[1] * v[1] + 1.0f);
-					outPixel[ 4 + sx] = solidAngleTerm((x + sx), y, 1.0f / inRes);
-					outPixel[ 8 + sx] = ryg_srgb8_to_float(*inPixel++);
-					outPixel[12 + sx] = ryg_srgb8_to_float(*inPixel++);
-					outPixel[16 + sx] = ryg_srgb8_to_float(*inPixel++);
+					*outPixel++ = 1.0f / sqrt(v[0] * v[0] + v[1] * v[1] + 1.0f);
+				}
+				for (sx = 0; sx < 4; sx++)
+				{
+					float solidAngle = solidAngleTerm((x + sx), y, 1.0f / inRes);
+					*outPixel++ = ryg_srgb8_to_float(*inPixel++) * solidAngle;
+					*outPixel++ = ryg_srgb8_to_float(*inPixel++) * solidAngle;
+					*outPixel++ = ryg_srgb8_to_float(*inPixel++) * solidAngle;
+					*outPixel++ = solidAngle;
 					inPixel++;
 				}
-				outPixel += 20;
 			}
 		}
 	}
@@ -464,11 +467,11 @@ SSE2FUNC void convolveFaceToVectorSSE2(float outColor[3], float *outWeightAccum,
 		int leftX4 = (endX - startX) / 4;
 		for (; leftX4; leftX4--, norm_angle_color += 20)
 		{
-			__m128 norm_4   = _mm_load_ps(norm_angle_color);
-			__m128 angle_4  = _mm_load_ps(norm_angle_color + 4);
-			__m128 color0_4 = _mm_load_ps(norm_angle_color + 8);
-			__m128 color1_4 = _mm_load_ps(norm_angle_color + 12);
-			__m128 color2_4 = _mm_load_ps(norm_angle_color + 16);
+			__m128 norm_4  = _mm_load_ps(norm_angle_color);
+			__m128 rgba0_4 = _mm_load_ps(norm_angle_color + 4);
+			__m128 rgba1_4 = _mm_load_ps(norm_angle_color + 8);
+			__m128 rgba2_4 = _mm_load_ps(norm_angle_color + 12);
+			__m128 rgba3_4 = _mm_load_ps(norm_angle_color + 16);
 			
 			__m128 nNL_4 = _mm_mul_ps(NL_4, norm_4);
 			nNL_4 = _mm_max_ps(nNL_4, _mm_setzero_ps());
@@ -478,17 +481,20 @@ SSE2FUNC void convolveFaceToVectorSSE2(float outColor[3], float *outWeightAccum,
 			ggx_4 = _mm_mul_ps(ggx_4, ggx_4);
 			ggx_4 = _mm_div_ps(aa_4, ggx_4);
 			
-			__m128 weight_4 = _mm_mul_ps(angle_4, nNL_4);
-			weight_4 = _mm_mul_ps(weight_4, ggx_4);
+			__m128 weight_4 = _mm_mul_ps(nNL_4, ggx_4);
 			
-			color0_4 = _mm_mul_ps(color0_4, weight_4);
-			color1_4 = _mm_mul_ps(color1_4, weight_4);
-			color2_4 = _mm_mul_ps(color2_4, weight_4);
+			__m128 weight0_4 = _mm_shuffle_ps(weight_4, weight_4, _MM_SHUFFLE(0, 0, 0, 0));
+			__m128 weight1_4 = _mm_shuffle_ps(weight_4, weight_4, _MM_SHUFFLE(1, 1, 1, 1));
+			__m128 weight2_4 = _mm_shuffle_ps(weight_4, weight_4, _MM_SHUFFLE(2, 2, 2, 2));
+			__m128 weight3_4 = _mm_shuffle_ps(weight_4, weight_4, _MM_SHUFFLE(3, 3, 3, 3));
 			
-			_MM_TRANSPOSE4_PS(color0_4, color1_4, color2_4, weight_4);
+			rgba0_4 = _mm_mul_ps(rgba0_4, weight0_4);
+			rgba1_4 = _mm_mul_ps(rgba1_4, weight1_4);
+			rgba2_4 = _mm_mul_ps(rgba2_4, weight2_4);
+			rgba3_4 = _mm_mul_ps(rgba3_4, weight3_4);
 
-			__m128 subtotal1_4 = _mm_add_ps(color0_4, color1_4);
-			__m128 subtotal2_4 = _mm_add_ps(color2_4, weight_4);
+			__m128 subtotal1_4 = _mm_add_ps(rgba0_4, rgba1_4);
+			__m128 subtotal2_4 = _mm_add_ps(rgba2_4, rgba3_4);
 			results_4 = _mm_add_ps(results_4, subtotal1_4);
 			results_4 = _mm_add_ps(results_4, subtotal2_4);
 
