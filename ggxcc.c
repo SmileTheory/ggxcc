@@ -264,7 +264,7 @@ float *formatDataForConvolutionSSE2(uint8_t *rgba8, int inRes)
 
 float *(*formatDataForConvolution)(uint8_t *, int) = formatDataForConvolutionScalar;
 
-void convolveFaceToVectorScalar(float outColor[3], float *outWeightAccum, float *vN_vE_FaceSpace, float *inDataFP32, int face, int width, int height, float roughness)
+void convolveFaceToVectorScalar(float outColor[3], float *outWeightAccum, float *vN_vE_FaceSpace, float *inDataFP32, int face, int width, int height, float roughness, float minNL)
 {
 	float color[3] = {0.0f, 0.0f, 0.0f}, weightAccum = 0.0f;
 	float alpha = roughness * roughness;
@@ -290,20 +290,20 @@ void convolveFaceToVectorScalar(float outColor[3], float *outWeightAccum, float 
 	int startY = 0, endY = height;
 	if (deltaNL_perY == 0.0f)
 	{
-		if (NL <= 0.0f)
+		if (NL <= minNL)
 			goto ConvolveFinish;
 	}
 	else if (deltaNL_perY < 0.0f)
 	{
-		if (NL <= 0.0f)
+		if (NL <= minNL)
 			goto ConvolveFinish;
-		endY = ceil(NL / -deltaNL_perY);
+		endY = ceil((NL - minNL) / -deltaNL_perY);
 		if (endY > height)
 			endY = height;
 	}
-	else if (NL <= 0.0f)
+	else if (NL <= minNL)
 	{
-		startY = ceil(-NL / deltaNL_perY);
+		startY = ceil(-(NL - minNL) / deltaNL_perY);
 		if (startY > height)
 			goto ConvolveFinish;
 		baseNL += deltaNL_perY * startY;
@@ -321,20 +321,20 @@ void convolveFaceToVectorScalar(float outColor[3], float *outWeightAccum, float 
 		int startX = 0, endX = width;
 		if (deltaNL_perX == 0.0f)
 		{
-			if (NL <= 0.0f)
+			if (NL <= minNL)
 				continue;
 		}
 		else if (deltaNL_perX < 0.0f)
 		{
-			if (NL <= 0.0f)
+			if (NL <= minNL)
 				continue;
-			endX = ceil(NL / -deltaNL_perX);
+			endX = ceil((NL - minNL) / -deltaNL_perX);
 			if (endX > width)
 				endX = width;
 		}
-		else if (NL <= 0.0f)
+		else if (NL <= minNL)
 		{
-			startX = ceil(-NL / deltaNL_perX);
+			startX = ceil(-(NL - minNL) / deltaNL_perX);
 			if (startX > width)
 				continue;
 			NL += deltaNL_perX * startX;
@@ -375,9 +375,11 @@ ConvolveFinish:
 }
 
 
-SSE2FUNC void convolveFaceToVectorSSE2(float outColor[3], float *outWeightAccum, float *vN_vE_FaceSpace, float *inDataFP32, int face, int width, int height, float roughness)
+SSE2FUNC void convolveFaceToVectorSSE2(float outColor[3], float *outWeightAccum, float *vN_vE_FaceSpace, float *inDataFP32, int face, int width, int height, float roughness, float minNL)
 {
 	__m128 results_4 = _mm_setzero_ps();
+	float alpha = roughness * roughness;
+	float aa = alpha * alpha;
 	
 	// delta for NL per coordinate increment
 	float deltaNL_perX = vN_vE_FaceSpace[0] * 2.0f / width;
@@ -395,29 +397,26 @@ SSE2FUNC void convolveFaceToVectorSSE2(float outColor[3], float *outWeightAccum,
 	int startY = 0, endY = height;
 	if (deltaNL_perY == 0.0f)
 	{
-		if (NL <= 0.0f)
+		if (NL <= minNL)
 			goto ConvolveFinishSSE2;
 	}
 	else if (deltaNL_perY < 0.0f)
 	{
-		if (NL <= 0.0f)
+		if (NL <= minNL)
 			goto ConvolveFinishSSE2;
-		endY = ceil(NL / -deltaNL_perY);
+		endY = ceil((NL - minNL) / -deltaNL_perY);
 		if (endY > height)
 			endY = height;
 	}
 	else if (NL <= 0.0f)
 	{
-		startY = ceil(-NL / deltaNL_perY);
+		startY = ceil(-(NL - minNL) / deltaNL_perY);
 		if (startY > height)
 			goto ConvolveFinishSSE2;
 		baseNL += deltaNL_perY * startY;
 	}
 	
 	float *base_norm_angle_color = inDataFP32 + ((face * width * height) + (startY * width)) * 5;
-
-	float alpha = roughness * roughness;
-	float aa = alpha * alpha;
 	
 	// constants to speed up ggx calculation in the main loop
 	float c1 = 0.5f * aa - 0.5f;
@@ -438,20 +437,20 @@ SSE2FUNC void convolveFaceToVectorSSE2(float outColor[3], float *outWeightAccum,
 		int startX = 0, endX = width;
 		if (deltaNL_perX == 0.0f)
 		{
-			if (NL <= 0.0f)
+			if (NL <= minNL)
 				continue;
 		}
 		else if (deltaNL_perX < 0.0f)
 		{
-			if (NL <= 0.0f)
+			if (NL <= minNL)
 				continue;
-			endX = ceil(NL / -deltaNL_perX);
+			endX = ceil((NL - minNL) / -deltaNL_perX);
 			if (endX > width)
 				endX = width;
 		}
-		else if (NL <= 0.0f)
+		else if (NL <= minNL)
 		{
-			startX = ceil(-NL / deltaNL_perX);
+			startX = ceil(-(NL - minNL) / deltaNL_perX);
 			if (startX > width)
 				continue;
 		}
@@ -509,9 +508,9 @@ ConvolveFinishSSE2:
 	*outWeightAccum = AS_FLOAT(GET_128(results_4).m128_u32[3]);
 }
 
-void (*convolveFaceToVector)(float[3], float *, float *, float *, int, int, int, float) = convolveFaceToVectorScalar;
+void (*convolveFaceToVector)(float[3], float *, float *, float *, int, int, int, float, float) = convolveFaceToVectorScalar;
 
-void convolveCubemapToPixel(uint8_t *outData, int outRes, int outNumMips, int outPixelCount, float *inDataFP32, int width, int height)
+void convolveCubemapToPixel(uint8_t *outData, int outRes, int outNumMips, int outPixelCount, float *inDataFP32, int width, int height, int simSamples)
 {
 	int outMipRes;
 	uint8_t *outPixel = outData + outPixelCount * 4;
@@ -568,8 +567,18 @@ void convolveCubemapToPixel(uint8_t *outData, int outRes, int outNumMips, int ou
 		vN_vE_FaceSpace[0] = (inAxis == 0) ? (inAxisNeg ? vN_vE[2] : -vN_vE[2]) : ((inFace == 5) ? -vN_vE[0] : vN_vE[0]);
 		vN_vE_FaceSpace[1] = (inAxis == 1) ? (inAxisNeg ? -vN_vE[2] : vN_vE[2]) : -vN_vE[1];
 		vN_vE_FaceSpace[2] = inAxisNeg ? -vN_vE[inAxis] : vN_vE[inAxis];
+
+		// use importance sampling equation to use smaller area
+		float minNL = 0.0f;
+		if (simSamples)
+		{
+			float alpha = roughness * roughness;
+			float aa = alpha * alpha;
+			float lastSample = (float)simSamples / (float)(simSamples + 1);
+			minNL = sqrt((1.0 - lastSample)/((aa - 1.0f) * lastSample + 1.0f));
+		}
 		
-		convolveFaceToVector(faceColor, &faceWeightAccum, vN_vE_FaceSpace, inDataFP32, inFace, width, height, roughness);
+		convolveFaceToVector(faceColor, &faceWeightAccum, vN_vE_FaceSpace, inDataFP32, inFace, width, height, roughness, minNL);
 		Vec3Add(color, color, faceColor);
 		weightAccum += faceWeightAccum;
 	}
@@ -593,6 +602,7 @@ struct convolveInfo
 	float *inDataFP32;
 	int inWidth;
 	int inHeight;
+	int simSamples;
 };
 
 void convolveCubemapToPixelThreaded(void *pArg, struct scheduler *s, sched_uint begin, sched_uint end, sched_uint thread)
@@ -601,7 +611,7 @@ void convolveCubemapToPixelThreaded(void *pArg, struct scheduler *s, sched_uint 
 
 	sched_uint i;
 	for (i = begin; i < end; i++)
-		convolveCubemapToPixel(info->outData, info->outRes, info->outNumMips, i, info->inDataFP32, info->inWidth, info->inHeight);
+		convolveCubemapToPixel(info->outData, info->outRes, info->outNumMips, i, info->inDataFP32, info->inWidth, info->inHeight, info->simSamples);
 }
 
 int main(int argc, char *argv[])
@@ -611,6 +621,7 @@ int main(int argc, char *argv[])
 	ddsType_t type;
 	ddsFlags_t flags;
 	int inWidth, inHeight, inNumMips;
+	int simSamples = 100;
 	int numThreads = SCHED_DEFAULT;
 	int detect = 1;
 
@@ -655,6 +666,20 @@ int main(int argc, char *argv[])
 				}
 				arg++;
 			}
+			else if (strcmp(argv[arg], "-i") == 0 && arg + 1 < argc)
+			{
+				simSamples = atoi(argv[arg + 1]);
+				if (simSamples < 0)
+				{
+					printf("Error! Number of samples must be >= 0.\n");
+					return 0;
+				}
+				if (simSamples == 0)
+					printf("Using all samples.\n", simSamples);
+				else
+					printf("Using %d simulated samples.\n", simSamples);
+				arg++;
+			}
 		}
 		else if (!inFilename)
 			inFilename = argv[arg];
@@ -677,6 +702,8 @@ int main(int argc, char *argv[])
 		printf("  -o <output.dds>  - Set output filename.  Default is output.dds.\n");
 		printf("  -t <threads>     - Set number of threads.  Default is all.\n");
 		printf("  -s <on|off|auto> - Enable SSE2 optimizations.  Default is autodetect.\n");
+		printf("  -i <samples>     - Simulate importance sampling for speedup.\n");
+		printf("                     Disable with 0.  Default is 100.\n");
 		printf("\nOnly dds, 8-bit RGBA files are accepted as input.\n");
 		return 0;
 	}
@@ -762,6 +789,7 @@ int main(int argc, char *argv[])
 		info.inDataFP32 = inDataFP32;
 		info.inWidth = inWidth;
 		info.inHeight = inHeight;
+		info.simSamples = simSamples;
 
 		scheduler_add(&task, &sched, convolveCubemapToPixelThreaded, &info, outNumPixels);
 		scheduler_join(&sched, &task);
@@ -770,7 +798,7 @@ int main(int argc, char *argv[])
 	{
 		int i;
 		for (i = 0; i < outNumPixels; i++)
-			convolveCubemapToPixel(outData, outRes, numMips, i, inDataFP32, inWidth, inHeight);
+			convolveCubemapToPixel(outData, outRes, numMips, i, inDataFP32, inWidth, inHeight, simSamples);
 	}
 	
 	printf("Saving...\n");
